@@ -219,16 +219,20 @@ func (c *Client) Mentions(yaps []Yap) ([]Yap, []Reply, error) {
 	return ys, rs, nil
 }
 
-// Karma is the leaderboard: likes received, per author.
+// Karma is the leaderboard: likes received, per author, plus badges.
 type Karma struct {
-	Login string
-	Karma int
-	Yaps  int
+	Login  string
+	Karma  int
+	Yaps   int
+	Badges []string
 }
 
 func leaderboard(yaps []Yap) []Karma {
 	byUser := map[string]*Karma{}
 	for _, y := range yaps {
+		if strings.HasSuffix(y.Author, "[bot]") {
+			continue
+		}
 		k, ok := byUser[y.Author]
 		if !ok {
 			k = &Karma{Login: y.Author}
@@ -253,6 +257,64 @@ func leaderboard(yaps []Yap) []Karma {
 	if len(out) > 10 {
 		out = out[:10]
 	}
+	for i := range out {
+		out[i].Badges = badges(out[i].Login, yaps, i < 3 && out[i].Karma >= 3)
+	}
+	return out
+}
+
+// badges mirrors `gh yap @user`: same rules, computed from the open yaps.
+func badges(login string, yaps []Yap, authority bool) []string {
+	var mine []Yap
+	quoted := false
+	for _, y := range yaps {
+		if y.Author == login {
+			mine = append(mine, y)
+		} else if strings.Contains(y.Text, "🔁 @"+login+" #") {
+			quoted = true
+		}
+	}
+	days := map[int64]bool{}
+	poll, loved, talk, agents := false, false, false, false
+	for _, y := range mine {
+		days[y.CreatedAt.Unix()/86400] = true
+		poll = poll || y.Poll != nil
+		loved = loved || y.Likes >= 5
+		talk = talk || y.Replies >= 5
+		agents = agents || y.Agent != ""
+	}
+	best, cur := 0, 0
+	var keys []int64
+	for d := range days {
+		keys = append(keys, d)
+	}
+	sort.Slice(keys, func(a, b int) bool { return keys[a] < keys[b] })
+	for i, d := range keys {
+		if i > 0 && d == keys[i-1]+1 {
+			cur++
+		} else {
+			cur = 1
+		}
+		if cur > best {
+			best = cur
+		}
+	}
+	var out []string
+	add := func(ok bool, b string) {
+		if ok {
+			out = append(out, b)
+		}
+	}
+	add(len(mine) >= 1, "🐣")
+	add(best >= 3, "🔥")
+	add(best >= 7, "📅")
+	add(poll, "📊")
+	add(loved, "❤️")
+	add(talk, "🗣️")
+	add(quoted, "🔁")
+	add(len(mine) >= 25, "💯")
+	add(agents, "🤖")
+	add(authority, "👑")
 	return out
 }
 

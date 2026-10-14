@@ -15,12 +15,13 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.1.1"
+const version = "0.2.0"
 const refreshEvery = 30 * time.Second
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,7 @@ const (
 	modeList mode = iota
 	modeDetail
 	modeCompose
+	modeSearch
 )
 
 type model struct {
@@ -102,6 +104,8 @@ type model struct {
 	replies  []Reply
 	viewport viewport.Model
 
+	search      textinput.Model
+	query       string
 	composer    textarea.Model
 	composeFor  int // 0 = new yap, else reply to #n
 	lastRefresh time.Time
@@ -144,7 +148,10 @@ func newModel(c *Client, repo string) model {
 	ta.SetHeight(3)
 	ta.Prompt = ""
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	return model{client: c, repo: repo, loading: true, composer: ta, viewport: viewport.New(80, 20)}
+	ti := textinput.New()
+	ti.Prompt = "🔎 "
+	ti.CharLimit = 60
+	return model{client: c, repo: repo, loading: true, composer: ta, search: ti, viewport: viewport.New(80, 20)}
 }
 
 func (m model) Init() tea.Cmd {
@@ -264,6 +271,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch m.mode {
+		case modeSearch:
+			return m.updateSearch(msg)
 		case modeCompose:
 			return m.updateCompose(msg)
 		case modeDetail:
@@ -323,6 +332,13 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "p":
 		return m.startCompose(0), nil
+	case "/":
+		m.mode = modeSearch
+		m.search.SetValue(m.query)
+		m.search.Focus()
+		return m, textinput.Blink
+	case "esc":
+		m.query, m.cursor, m.scroll = "", 0, 0
 	case "o":
 		if y := m.selected(); y != nil {
 			openBrowser(y.URL)
@@ -370,6 +386,27 @@ func (m model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
+}
+
+func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.mode, m.query = modeList, ""
+		m.search.Blur()
+		m.cursor, m.scroll = 0, 0
+		return m, nil
+	case "enter":
+		m.mode = modeList
+		m.search.Blur()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.search, cmd = m.search.Update(msg)
+	m.query = strings.TrimSpace(m.search.Value())
+	m.cursor, m.scroll = 0, 0
 	return m, cmd
 }
 
@@ -441,8 +478,23 @@ func (m model) like(n int) tea.Cmd {
 	}
 }
 
-// items are the yaps shown on the current tab.
+// items are the yaps shown on the current tab, narrowed by the search query.
 func (m model) items() []Yap {
+	all := m.tabItems()
+	if m.query == "" {
+		return all
+	}
+	q := strings.ToLower(m.query)
+	var out []Yap
+	for _, y := range all {
+		if strings.Contains(strings.ToLower(y.Text), q) || strings.Contains(strings.ToLower("@"+y.Author), q) {
+			out = append(out, y)
+		}
+	}
+	return out
+}
+
+func (m model) tabItems() []Yap {
 	switch m.tab {
 	case tabPolls:
 		var out []Yap
@@ -500,8 +552,13 @@ func (m model) View() string {
 		body = m.viewport.View()
 	case modeCompose:
 		body = m.viewCompose()
+	case modeSearch:
+		body = m.search.View() + "\n\n" + m.viewList()
 	default:
 		body = m.viewList()
+		if m.query != "" {
+			body = sDim.Render("🔎 "+m.query+" · esc") + "\n\n" + body
+		}
 	}
 	frame := sFrame.Width(m.width - 2).Height(m.height - 5).Render(body)
 	return lipgloss.JoinVertical(lipgloss.Left, m.viewHeader(), frame, m.viewFooter())
@@ -538,6 +595,8 @@ func (m model) viewFooter() string {
 		keys = t("keys.detail")
 	case modeCompose:
 		keys = t("keys.compose")
+	case modeSearch:
+		keys = t("keys.search")
 	}
 	line := sDim.Render(" " + keys)
 	if m.err != nil {
@@ -637,7 +696,7 @@ func (m model) viewTop(w int) string {
 			rank = "👑 "
 			name = sCursor.Render(fmt.Sprintf("%-22s", "@"+k.Login))
 		}
-		out = append(out, fmt.Sprintf("  %s %s %s %s", rank, name, sHeart.Render(fmt.Sprintf("♥ %-5d", k.Karma)), sDim.Render(fmt.Sprintf("· %d yaps", k.Yaps))))
+		out = append(out, fmt.Sprintf("  %s %s %s %s  %s", rank, name, sHeart.Render(fmt.Sprintf("♥ %-5d", k.Karma)), sDim.Render(fmt.Sprintf("%-10s", fmt.Sprintf("· %d yaps", k.Yaps))), strings.Join(k.Badges, " ")))
 	}
 	return strings.Join(out, "\n")
 }
