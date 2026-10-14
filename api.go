@@ -158,6 +158,19 @@ func (c *Client) Feed() ([]Yap, error) {
 	return yaps, nil
 }
 
+// Yap fetches a single yap. Unlike the issue list, this endpoint reflects a new
+// reaction or comment right away, so it's what we re-read after an action.
+func (c *Client) Yap(n int) (*Yap, error) {
+	var i ghIssue
+	if err := c.rest.Get(fmt.Sprintf("repos/%s/issues/%d", c.repo, n), &i); err != nil {
+		return nil, err
+	}
+	if y, ok := parseYap(i); ok {
+		return &y, nil
+	}
+	return nil, nil
+}
+
 // Replies returns the comments on a yap, oldest first.
 func (c *Client) Replies(n int) ([]Reply, error) {
 	var comments []ghIssue

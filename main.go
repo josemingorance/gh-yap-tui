@@ -20,7 +20,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.1.0"
+const version = "0.1.1"
 const refreshEvery = 30 * time.Second
 
 // ---------------------------------------------------------------------------
@@ -119,9 +119,21 @@ type repliesMsg struct {
 	err     error
 }
 type actionMsg struct {
-	text string
-	err  error
+	text  string
+	err   error
+	yap   *Yap // the yap as it is right after the action
+	isNew bool // a yap we just posted
 }
+
+// fresh re-reads yap n after an action and wraps it in an actionMsg.
+func fresh(c *Client, n int, text string, isNew bool) tea.Msg {
+	y, err := c.Yap(n)
+	if err != nil {
+		return actionMsg{text: text}
+	}
+	return actionMsg{text: text, yap: y, isNew: isNew}
+}
+
 type tickMsg time.Time
 
 func newModel(c *Client, repo string) model {
@@ -224,11 +236,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status, m.statusOK = msg.text, true
-		cmds := []tea.Cmd{m.load()}
-		if m.detail != nil {
-			cmds = append(cmds, m.loadReplies(m.detail.Number))
+		// Apply the fresh copy instead of reloading the whole list: the list
+		// endpoint lags a few seconds and would show the old counts.
+		if y := msg.yap; y != nil {
+			found := false
+			for i := range m.yaps {
+				if m.yaps[i].Number == y.Number {
+					m.yaps[i], found = *y, true
+				}
+			}
+			if !found && msg.isNew {
+				m.yaps = append([]Yap{*y}, m.yaps...)
+				if m.tab == tabFeed && m.mode == modeList {
+					m.cursor = 0
+				}
+			}
+			if m.detail != nil && m.detail.Number == y.Number {
+				yy := *y
+				m.detail = &yy
+				m.viewport.SetContent(m.renderDetail())
+			}
 		}
-		return m, tea.Batch(cmds...)
+		if m.detail != nil {
+			return m, m.loadReplies(m.detail.Number)
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		switch m.mode {
@@ -333,7 +365,7 @@ func (m model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err := c.Vote(n, k); err != nil {
 				return actionMsg{err: err}
 			}
-			return actionMsg{text: fmt.Sprintf(t("voted"), pollEmoji[k-1], n)}
+			return fresh(c, n, fmt.Sprintf(t("voted"), pollEmoji[k-1], n), false)
 		}
 	}
 	var cmd tea.Cmd
@@ -386,12 +418,12 @@ func (m model) updateCompose(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					return actionMsg{err: err}
 				}
-				return actionMsg{text: fmt.Sprintf(t("posted"), n)}
+				return fresh(c, n, fmt.Sprintf(t("posted"), n), true)
 			}
 			if err := c.Reply(to, text); err != nil {
 				return actionMsg{err: err}
 			}
-			return actionMsg{text: fmt.Sprintf(t("replied"), to)}
+			return fresh(c, to, fmt.Sprintf(t("replied"), to), false)
 		}
 	}
 	var cmd tea.Cmd
@@ -405,7 +437,7 @@ func (m model) like(n int) tea.Cmd {
 		if err := c.Like(n); err != nil {
 			return actionMsg{err: err}
 		}
-		return actionMsg{text: fmt.Sprintf(t("liked"), n)}
+		return fresh(c, n, fmt.Sprintf(t("liked"), n), false)
 	}
 }
 
