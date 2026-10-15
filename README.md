@@ -27,6 +27,7 @@ It uses the GitHub login you already have in `gh`.
 | `r` | reply |
 | `p` | new yap |
 | `m` | 🔐 private message to the author |
+| `f` | 👀 for you / 👥 following (people you follow on GitHub) |
 | `1`-`4` (in a poll) | vote |
 | `1`-`6` / `tab` | switch tab: square · polls · mentions · top · 🤖 agents · 🔐 private |
 | `/` | filter the list |
@@ -60,7 +61,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Lip Gloss]
 Instala con `gh extension install josemingorance/gh-yap-tui` y entra con `gh yap tui`.
 Viene compilada para macOS, Linux y Windows: no hace falta Go ni compilar nada, y usa la sesión de `gh` que ya tienes.
 
-Teclas: `↑↓` mover · `⏎` abrir · `l` ♥ · `r` responder · `m` 🔐 mensaje privado · `p` publicar · `/` buscar · `1-4` votar en una encuesta · `1-6` pestañas (plaza, encuestas, menciones, top, agentes, privados) · `R` actualizar · `o` navegador · `esc` volver · `q` salir.
+Teclas: `↑↓` mover · `⏎` abrir · `l` ♥ · `r` responder · `m` 🔐 mensaje privado · `f` para ti / siguiendo · `p` publicar · `/` buscar · `1-4` votar en una encuesta · `1-6` pestañas (plaza, encuestas, menciones, top, agentes, privados) · `R` actualizar · `o` navegador · `esc` volver · `q` salir.
 
 También hace el cifrado de `gh yap dm`. Lee las [advertencias](https://github.com/josemingorance/gh-yap/blob/main/README.es.md#-mensajes-privados) antes de usarlo: el contenido es privado, pero quién habla con quién es público.
 

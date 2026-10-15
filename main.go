@@ -21,7 +21,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 const refreshEvery = 30 * time.Second
 
 // ---------------------------------------------------------------------------
@@ -111,6 +111,8 @@ type model struct {
 	replies  []Reply
 	viewport viewport.Model
 
+	following   map[string]bool
+	followOnly  bool
 	search      textinput.Model
 	query       string
 	composer    textarea.Model
@@ -119,10 +121,11 @@ type model struct {
 }
 
 type feedMsg struct {
-	yaps     []Yap
-	mentions []Yap
-	replies  []Reply
-	err      error
+	following map[string]bool
+	yaps      []Yap
+	mentions  []Yap
+	replies   []Reply
+	err       error
 }
 type repliesMsg struct {
 	n       int
@@ -182,7 +185,8 @@ func (m model) load() tea.Cmd {
 		if err != nil {
 			return feedMsg{yaps: yaps, err: err}
 		}
-		return feedMsg{yaps: yaps, mentions: my, replies: mr}
+		fl, _ := c.Following()
+		return feedMsg{yaps: yaps, mentions: my, replies: mr, following: fl}
 	}
 }
 
@@ -222,6 +226,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.yaps != nil {
 			m.yaps = msg.yaps
 			m.mentions, m.mentionR = msg.mentions, msg.replies
+			if msg.following != nil {
+				m.following = msg.following
+			}
 			m.lastRefresh = time.Now()
 			if m.detail != nil {
 				for i := range m.yaps {
@@ -397,6 +404,11 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "p":
 		return m.startCompose(0), nil
+	case "f":
+		if m.tab == tabFeed {
+			m.followOnly = !m.followOnly
+			m.cursor, m.scroll = 0, 0
+		}
 	case "m":
 		if y := m.selected(); y != nil && !strings.HasSuffix(y.Author, "[bot]") {
 			return m.openDM(y.Author)
@@ -600,6 +612,15 @@ func (m model) tabItems() []Yap {
 	case tabTop, tabDMs:
 		return nil
 	}
+	if m.followOnly {
+		var out []Yap
+		for _, y := range m.yaps {
+			if m.following[strings.ToLower(y.Author)] {
+				out = append(out, y)
+			}
+		}
+		return out
+	}
 	return m.yaps
 }
 
@@ -649,6 +670,13 @@ func (m model) View() string {
 		body = m.viewDMNotice()
 	default:
 		body = m.viewList()
+		if m.tab == tabFeed && m.mode == modeList {
+			label := sTabOn.Render("👀 "+t("feed.foryou")) + sTabOff.Render("👥 "+t("feed.following"))
+			if m.followOnly {
+				label = sTabOff.Render("👀 "+t("feed.foryou")) + sTabOn.Render("👥 "+t("feed.following"))
+			}
+			body = label + sDim.Render("  f") + "\n\n" + body
+		}
 		if m.query != "" {
 			body = sDim.Render("🔎 "+m.query+" · esc") + "\n\n" + body
 		}
@@ -730,6 +758,10 @@ func (m model) viewList() string {
 			key = "empty.ments"
 		case tabAgents:
 			key = "empty.agents"
+		case tabFeed:
+			if m.followOnly {
+				key = "empty.following"
+			}
 		}
 		out := sDim.Render(t(key))
 		if m.tab == tabMentions {

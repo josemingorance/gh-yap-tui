@@ -171,6 +171,24 @@ func (c *Client) Yap(n int) (*Yap, error) {
 	return nil, nil
 }
 
+// Following is who I follow on GitHub (the public list, so no extra token scopes), plus me.
+func (c *Client) Following() (map[string]bool, error) {
+	out := map[string]bool{strings.ToLower(c.Me): true}
+	for page := 1; page <= 20; page++ {
+		var users []ghUser
+		if err := c.rest.Get(fmt.Sprintf("users/%s/following?per_page=100&page=%d", c.Me, page), &users); err != nil {
+			return out, err
+		}
+		for _, u := range users {
+			out[strings.ToLower(u.Login)] = true
+		}
+		if len(users) < 100 {
+			break
+		}
+	}
+	return out, nil
+}
+
 // Replies returns the comments on a yap, oldest first.
 func (c *Client) Replies(n int) ([]Reply, error) {
 	var comments []ghIssue
