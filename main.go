@@ -21,7 +21,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 const refreshEvery = 30 * time.Second
 
 // ---------------------------------------------------------------------------
@@ -70,6 +70,7 @@ const (
 	tabMentions
 	tabTop
 	tabAgents
+	tabDMs
 	tabCount
 )
 
@@ -80,11 +81,17 @@ const (
 	modeDetail
 	modeCompose
 	modeSearch
+	modeDMThread
+	modeDMPass
+	modeDMNotice
 )
 
 type model struct {
-	client *Client
-	repo   string
+	client    *Client
+	dmClient  *Client // same login, pointed at the DM repo
+	repo      string
+	dm        dmState
+	composeDM string // when set, the composer writes an encrypted DM to this user
 
 	width, height int
 	tab           tab
@@ -151,7 +158,9 @@ func newModel(c *Client, repo string) model {
 	ti := textinput.New()
 	ti.Prompt = "🔎 "
 	ti.CharLimit = 60
-	return model{client: c, repo: repo, loading: true, composer: ta, search: ti, viewport: viewport.New(80, 20)}
+	dc := *c
+	dc.repo = dmRepo()
+	return model{client: c, dmClient: &dc, repo: repo, loading: true, composer: ta, search: ti, viewport: viewport.New(80, 20)}
 }
 
 func (m model) Init() tea.Cmd {
@@ -227,6 +236,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		return m, nil
 
+	case dmConvsMsg:
+		m.dm.loaded = true
+		if msg.err != nil {
+			m.status, m.statusOK = fmt.Sprintf(t("error"), msg.err), false
+			return m, nil
+		}
+		m.dm.convs, m.dm.counts, m.dm.last = msg.convs, msg.counts, msg.last
+		return m, nil
+
+	case dmThreadMsg:
+		if msg.err != nil {
+			m.status, m.statusOK = fmt.Sprintf(t("error"), msg.err), false
+		}
+		if msg.with == m.dm.with {
+			m.dm.thread = msg.thread
+			failed := 0
+			for _, d := range msg.thread {
+				if d.Err != nil {
+					failed++
+				}
+			}
+			if failed > 0 && failed == len(msg.thread) {
+				m.status, m.statusOK = t("dm.cantread"), false
+				m.dm.id = nil // maybe a wrong passphrase: ask again next time
+			}
+			m.viewport.SetContent(m.renderDMThread())
+			m.viewport.GotoBottom()
+		}
+		return m, nil
+
+	case dmSentMsg:
+		m.status, m.statusOK = msg.text, true
+		return m, m.loadDMThread(msg.to)
+
 	case repliesMsg:
 		if m.detail != nil && m.detail.Number == msg.n {
 			m.replies = msg.replies
@@ -271,6 +314,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch m.mode {
+		case modeDMThread:
+			return m.updateDMThread(msg)
+		case modeDMPass:
+			return m.updateDMPass(msg)
+		case modeDMNotice:
+			return m.updateDMNotice(msg)
 		case modeSearch:
 			return m.updateSearch(msg)
 		case modeCompose:
@@ -294,19 +343,29 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor--
 		}
 	case "down", "j":
-		if m.cursor < len(items)-1 {
+		limit := len(items)
+		if m.tab == tabDMs {
+			limit = len(m.dm.convs)
+		}
+		if m.cursor < limit-1 {
 			m.cursor++
 		}
 	case "g", "home":
 		m.cursor = 0
 	case "G", "end":
 		m.cursor = len(items) - 1
-	case "1", "2", "3", "4", "5":
+	case "1", "2", "3", "4", "5", "6":
 		m.tab = tab(msg.String()[0] - '1')
 		m.cursor, m.scroll, m.status = 0, 0, ""
+		if m.tab == tabDMs {
+			return m, m.loadDMConvs()
+		}
 	case "tab", "right":
 		m.tab = (m.tab + 1) % tabCount
 		m.cursor, m.scroll, m.status = 0, 0, ""
+		if m.tab == tabDMs {
+			return m, m.loadDMConvs()
+		}
 	case "shift+tab", "left":
 		m.tab = (m.tab + tabCount - 1) % tabCount
 		m.cursor, m.scroll, m.status = 0, 0, ""
@@ -315,6 +374,12 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = ""
 		return m, m.load()
 	case "enter", "v":
+		if m.tab == tabDMs {
+			if m.cursor < len(m.dm.convs) {
+				return m.openDM(m.dm.convs[m.cursor].With)
+			}
+			return m, nil
+		}
 		if y := m.selected(); y != nil {
 			yy := *y
 			m.detail, m.replies, m.mode = &yy, nil, modeDetail
@@ -332,6 +397,10 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "p":
 		return m.startCompose(0), nil
+	case "m":
+		if y := m.selected(); y != nil && !strings.HasSuffix(y.Author, "[bot]") {
+			return m.openDM(y.Author)
+		}
 	case "/":
 		m.mode = modeSearch
 		m.search.SetValue(m.query)
@@ -361,6 +430,11 @@ func (m model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.like(m.detail.Number)
 	case "r":
 		return m.startCompose(m.detail.Number), nil
+	case "m":
+		if !strings.HasSuffix(m.detail.Author, "[bot]") {
+			return m.openDM(m.detail.Author)
+		}
+		return m, nil
 	case "o":
 		openBrowser(m.detail.URL)
 		return m, nil
@@ -411,7 +485,8 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) startCompose(replyTo int) model {
-	m.mode, m.composeFor, m.status = modeCompose, replyTo, ""
+	m.mode, m.composeFor, m.status, m.composeDM = modeCompose, replyTo, "", ""
+	m.composer.CharLimit = maxLen
 	m.composer.Reset()
 	m.composer.Focus()
 	return m
@@ -423,9 +498,12 @@ func (m model) updateCompose(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		m.composer.Blur()
-		if m.detail != nil {
+		switch {
+		case m.composeDM != "":
+			m.mode = modeDMThread
+		case m.detail != nil:
 			m.mode = modeDetail
-		} else {
+		default:
 			m.mode = modeList
 		}
 		return m, nil
@@ -433,6 +511,11 @@ func (m model) updateCompose(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		text := strings.TrimSpace(m.composer.Value())
 		if text == "" {
 			return m, nil
+		}
+		if to := m.composeDM; to != "" {
+			m.composer.Blur()
+			m.mode = modeDMThread
+			return m, m.sendDMCmd(to, text)
 		}
 		if n := len([]rune(text)); n > maxLen {
 			m.status, m.statusOK = fmt.Sprintf(t("toolong"), n, maxLen), false
@@ -514,7 +597,7 @@ func (m model) tabItems() []Yap {
 			}
 		}
 		return out
-	case tabTop:
+	case tabTop, tabDMs:
 		return nil
 	}
 	return m.yaps
@@ -530,6 +613,9 @@ func (m model) selected() *Yap {
 
 func (m *model) clampCursor() {
 	n := len(m.items())
+	if m.tab == tabDMs {
+		n = len(m.dm.convs)
+	}
 	if m.cursor >= n {
 		m.cursor = n - 1
 	}
@@ -554,6 +640,13 @@ func (m model) View() string {
 		body = m.viewCompose()
 	case modeSearch:
 		body = m.search.View() + "\n\n" + m.viewList()
+	case modeDMThread:
+		m.viewport.SetContent(m.renderDMThread())
+		body = m.viewport.View()
+	case modeDMPass:
+		body = m.viewDMPass()
+	case modeDMNotice:
+		body = m.viewDMNotice()
 	default:
 		body = m.viewList()
 		if m.query != "" {
@@ -575,7 +668,7 @@ func (m model) viewHeader() string {
 		gap = 1
 	}
 	top := left + strings.Repeat(" ", gap) + live
-	names := []string{t("tab.feed"), t("tab.polls"), t("tab.mentions"), t("tab.top"), "🤖 " + t("tab.agents")}
+	names := []string{t("tab.feed"), t("tab.polls"), t("tab.mentions"), t("tab.top"), "🤖 " + t("tab.agents"), "🔐 " + t("tab.dms")}
 	var tabs []string
 	for i, n := range names {
 		label := fmt.Sprintf("%d %s", i+1, n)
@@ -597,6 +690,10 @@ func (m model) viewFooter() string {
 		keys = t("keys.compose")
 	case modeSearch:
 		keys = t("keys.search")
+	case modeDMThread:
+		keys = t("keys.dm")
+	case modeDMPass, modeDMNotice:
+		keys = ""
 	}
 	line := sDim.Render(" " + keys)
 	if m.err != nil {
@@ -616,6 +713,9 @@ func (m model) viewList() string {
 	h := m.height - 7
 	if m.tab == tabTop {
 		return m.viewTop(w)
+	}
+	if m.tab == tabDMs {
+		return m.viewDMList()
 	}
 	items := m.items()
 	if m.loading && len(m.yaps) == 0 {
@@ -868,6 +968,19 @@ func openBrowser(url string) {
 // ---------------------------------------------------------------------------
 
 func main() {
+	detectLang()
+	if len(os.Args) > 1 && os.Args[1] == "dm" { // encrypted private messages, CLI only
+		client, err := newClient(dmRepo())
+		if err == nil {
+			err = runDM(client, os.Args[2:])
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, sErr.Render("✗ ")+err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+
 	repo := os.Getenv("GH_YAP_REPO")
 	if repo == "" {
 		repo = "josemingorance/yap"
