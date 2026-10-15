@@ -92,6 +92,12 @@ func (c *Client) recipientKeys(login string) ([]age.Recipient, []string, error) 
 
 func (c *Client) publicKeys(login string) ([]string, error) {
 	if f := os.Getenv("GH_YAP_DM_TEST_KEYS"); f != "" { // testing hook: "login key..." per line
+		// A swapped key file would silently redirect messages to someone else's key,
+		// so it only works against a non-default repo and always says so.
+		if os.Getenv("GH_YAP_DM_REPO") == "" || dmRepo() == "josemingorance/yap-dm" {
+			return nil, errors.New("GH_YAP_DM_TEST_KEYS only works together with a test GH_YAP_DM_REPO")
+		}
+		fmt.Fprintln(os.Stderr, sErr.Render("⚠️  using TEST keys from "+f+", not GitHub"))
 		return testKeys(f, login)
 	}
 	var keys []struct {
@@ -157,10 +163,40 @@ func loadIdentity(passphrase func() ([]byte, error)) (age.Identity, string, erro
 				return nil, path, err
 			}
 		}
-		id2, err := agessh.NewEncryptedSSHIdentity(pub, pemBytes, passphrase)
+		if passphrase == nil {
+			return nil, path, errors.New(t("dm.needpass"))
+		}
+		pw, err := passphrase()
+		if err != nil {
+			return nil, path, err
+		}
+		if _, err := ssh.ParseRawPrivateKeyWithPassphrase(pemBytes, pw); err != nil {
+			return nil, path, errors.New(t("dm.badpass"))
+		}
+		id2, err := agessh.NewEncryptedSSHIdentity(pub, pemBytes, func() ([]byte, error) { return pw, nil })
 		return id2, path, err
 	}
 	return nil, "", errors.New(t("dm.nokey"))
+}
+
+// localKeyFingerprint reads the public half of the local key (never the private one).
+func localKeyFingerprint() (string, string) {
+	var candidates []string
+	if p := os.Getenv("GH_YAP_SSH_KEY"); p != "" {
+		candidates = []string{p}
+	} else if home, err := os.UserHomeDir(); err == nil {
+		candidates = []string{filepath.Join(home, ".ssh", "id_ed25519"), filepath.Join(home, ".ssh", "id_rsa")}
+	}
+	for _, path := range candidates {
+		b, err := os.ReadFile(path + ".pub")
+		if err != nil {
+			continue
+		}
+		if pk, _, _, _, err := ssh.ParseAuthorizedKey(b); err == nil {
+			return ssh.FingerprintSHA256(pk), path
+		}
+	}
+	return "", ""
 }
 
 func ttyPassphrase() ([]byte, error) {
@@ -237,10 +273,29 @@ type DM struct {
 // one of the two participants opened it: anyone can open issues in a public
 // repo, so a stranger's issue is ignored.
 func (c *Client) conversations() ([]Conversation, error) {
+	// Ask GitHub only for threads I opened or am mentioned in (the thread body
+	// mentions both people), so junk issues from strangers can't push mine away.
 	var issues []ghIssue
-	if err := c.rest.Get(fmt.Sprintf("repos/%s/issues?state=all&sort=created&direction=asc&per_page=100", dmRepo()), &issues); err != nil {
-		return nil, err
+	seen := map[int]bool{}
+	for _, filter := range []string{"creator", "mentioned"} {
+		for page := 1; page <= 10; page++ {
+			var batch []ghIssue
+			path := fmt.Sprintf("repos/%s/issues?state=all&%s=%s&sort=created&direction=asc&per_page=100&page=%d", dmRepo(), filter, c.Me, page)
+			if err := c.rest.Get(path, &batch); err != nil {
+				return nil, err
+			}
+			for _, i := range batch {
+				if !seen[i.Number] {
+					seen[i.Number] = true
+					issues = append(issues, i)
+				}
+			}
+			if len(batch) < 100 {
+				break
+			}
+		}
 	}
+	sort.Slice(issues, func(a, b int) bool { return issues[a].Number < issues[b].Number })
 	return filterConversations(issues, c.Me), nil
 }
 
@@ -335,12 +390,15 @@ func (c *Client) sendDM(to, text string, dryRun bool) (string, error) {
 	if len(theirs) == 0 {
 		return "", fmt.Errorf(t("dm.nokeys"), to)
 	}
-	mine, _, err := c.recipientKeys(c.Me)
+	mine, myUsed, err := c.recipientKeys(c.Me)
 	if err != nil {
 		return "", err
 	}
 	if len(mine) == 0 {
 		return "", fmt.Errorf(t("dm.nokeys"), c.Me)
+	}
+	if fp, path := localKeyFingerprint(); fp != "" && !strings.Contains(strings.Join(myUsed, " "), fp) {
+		fmt.Fprintln(os.Stderr, sErr.Render(fmt.Sprintf(t("dm.keymismatch"), shortPath(path))))
 	}
 	ct, err := encrypt(text, append(theirs, mine...)...)
 	if err != nil {
@@ -359,7 +417,10 @@ func (c *Client) sendDM(to, text string, dryRun bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(t("dm.sent"), to), c.post(fmt.Sprintf("repos/%s/issues/%d/comments", dmRepo(), cv.Number), map[string]string{"body": body}, nil)
+	if err := c.post(fmt.Sprintf("repos/%s/issues/%d/comments", dmRepo(), cv.Number), map[string]string{"body": body}, nil); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(t("dm.sent"), to) + "\n    " + sDim.Render(strings.Join(theirUsed, "\n    ")), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +497,7 @@ func runDM(c *Client, args []string) error {
 	}
 
 	switch sub {
-	case "list", "ls":
+	case "list", "ls": // metadata only (it's public anyway), so no terminal needed
 		if err := dmGuard(false); err != nil {
 			return err
 		}

@@ -144,3 +144,30 @@ func TestAgentsAreRefused(t *testing.T) {
 		t.Fatal("without a terminal, DMs must refuse") // go test has no TTY on stdin
 	}
 }
+
+func TestTestKeysNeedATestRepo(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "keys")
+	os.WriteFile(f, []byte("jose ssh-ed25519 AAAA\n"), 0o600)
+	t.Setenv("GH_YAP_DM_TEST_KEYS", f)
+	t.Setenv("GH_YAP_DM_REPO", "")
+	if _, err := (&Client{}).publicKeys("jose"); err == nil {
+		t.Fatal("test keys must be refused against the real DM repo")
+	}
+	t.Setenv("GH_YAP_DM_REPO", "josemingorance/yap-dm")
+	if _, err := (&Client{}).publicKeys("jose"); err == nil {
+		t.Fatal("test keys must be refused against the real DM repo, even if named explicitly")
+	}
+}
+
+func TestWrongPassphraseIsClear(t *testing.T) {
+	pub, priv := newKey(t, "right")
+	path := filepath.Join(t.TempDir(), "id_ed25519")
+	os.WriteFile(path, priv, 0o600)
+	os.WriteFile(path+".pub", []byte(pub+"\n"), 0o644)
+	t.Setenv("GH_YAP_SSH_KEY", path)
+	lang = "en"
+	_, _, err := loadIdentity(func() ([]byte, error) { return []byte("wrong"), nil })
+	if err == nil || !strings.Contains(err.Error(), "wrong passphrase") {
+		t.Fatalf("want a clear wrong-passphrase error, got %v", err)
+	}
+}
